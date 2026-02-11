@@ -2,174 +2,201 @@ import numpy as np
 from gensim.models import KeyedVectors
 from k_means_constrained import KMeansConstrained
 from sklearn.preprocessing import normalize
+from sklearn.metrics.pairwise import euclidean_distances
 import json
 import random
-from tqdm import tqdm  # Import tqdm for progress bar
+from tqdm import tqdm
+from multiprocessing import Pool, freeze_support
 
-def get_predicted_groups(words, model):
-    # Loads the vector path
+# global variable for worker processes
+model_shared = None
+
+def init_worker(model_path):
+    # loads model once per process
+    global model_shared
+    model_shared = KeyedVectors.load_word2vec_format(model_path, binary=True, limit=500000)
+
+def get_word_vectors(words):
+    # uses global model
+    model = model_shared
     word_vectors = []
-    valid_words = []
-
-    # Checks if word is tagged with noun/adj/etc
+    
     sample_key = model.index_to_key[0]
     has_tags = "_" in sample_key
 
-    # Vectorizes word
     for word in words:
-        # Standardize input
         clean_word = word.lower()
         found_vector = None
         
-        # Attempts to lookup the word by finding it off the tag
         if has_tags:
             guesses = [f"{clean_word}_NOUN", f"{clean_word}_VERB", f"{clean_word}_PROPN"]
             for guess in guesses:
                 if guess in model:
                     found_vector = model[guess]
                     break
-
             if found_vector is None:
                 for key in model.key_to_index:
                     if key.startswith(clean_word + "_"):
                         found_vector = model[key]
                         break
-                        
         else:
-            # Standard lookup
             candidates = [word, word.lower(), word.title()]
             for cand in candidates:
                 if cand in model:
                     found_vector = model[cand]
                     break
         
-        # Error handling if word is not found
         if found_vector is not None:
             word_vectors.append(found_vector)
-            valid_words.append(word)
         else:
-            # print(f"'{word}' not found. Using Zero Vector.")
             word_vectors.append(np.zeros(model.vector_size))
-            valid_words.append(word)
 
-    # Convert list of arrays to a single numpy matrix (N x 300)
-    X = np.array(word_vectors)
+    return np.array(word_vectors)
 
-    # Normalize using cosine similarity
+def find_best_group(current_words, banned_groups):
+    # safety check
+    if len(current_words) < 4: return None
+
+    X = get_word_vectors(current_words)
     X_norm = normalize(X)
-
+    
+    n_clusters = len(current_words) // 4
+    
     best_inertia = float('inf')
-    best_labels = None
+    best_group = None
 
-    for i in range(250):
-        # We use a different random_state each time
+    for i in range(2):
         clf = KMeansConstrained(
-            n_clusters=4,
+            n_clusters=n_clusters,
             size_min=4,
             size_max=4,
             random_state=i 
         )
         clf.fit(X_norm)
         
-        # Inertia is how tightly clumped the clusters are
-        if clf.inertia_ < best_inertia:
-            best_inertia = clf.inertia_
-            best_labels = clf.labels_
+        centers = clf.cluster_centers_
+        labels = clf.labels_
+        
+        for label_id in range(n_clusters):
+            indices = np.where(labels == label_id)[0]
+            group_words = [current_words[idx] for idx in indices]
+            group_set = set(group_words)
+            
+            # check banned
+            is_banned = False
+            for banned in banned_groups:
+                if group_set == banned:
+                    is_banned = True
+                    break
+            if is_banned: continue
+            
+            # calc inertia
+            group_vectors = X_norm[indices]
+            center = centers[label_id].reshape(1, -1)
+            dists = euclidean_distances(group_vectors, center)
+            inertia = np.sum(dists ** 2)
+            
+            if inertia < best_inertia:
+                best_inertia = inertia
+                best_group = group_words
+
+    return best_group
+
+def solve_puzzle_worker(p):
+    # plays one game
+    correct_sets = []
+    board_words = []
     
-    clusters = {0: [], 1: [], 2: [], 3: []}
+    for ans in p['answers']:
+        members = ans['members']
+        board_words.extend(members)
+        correct_sets.append(set(members))
+        
+    random.shuffle(board_words)
     
-    for word, label in zip(valid_words, best_labels):
-        clusters[label].append(word)
-
-    return list(clusters.values())
-
-def solve_single_game(vec_path):
-    model = KeyedVectors.load_word2vec_format(vec_path, binary=True, limit=500000)
-
-    print("Enter 16 words separated by commas.")
-    user_input = input("Words: ")
+    lives = 3
+    banned_groups = []
+    groups_found = 0
+    categories_found = 0
     
-    # Process input: split by comma and strip whitespace
-    puzzle_words = [w.strip() for w in user_input.split(',')]
+    while lives > 0 and groups_found < 4:
+        guess = find_best_group(board_words, banned_groups)
+        
+        if guess is None: break
+        
+        guess_set = set(guess)
+        
+        is_correct = False
+        for correct in correct_sets:
+            if guess_set == correct:
+                is_correct = True
+                break
+        
+        if is_correct:
+            groups_found += 1
+            categories_found += 1
+            board_words = [w for w in board_words if w not in guess_set]
+        else:
+            lives -= 1
+            banned_groups.append(guess_set)
+            
+    win = 1 if groups_found == 4 else 0
     
-    groups = get_predicted_groups(puzzle_words, model)
+    # checks for perfect game
+    perfect_data = None
+    if win == 1 and lives == 3:
+        perfect_data = p
+        
+    return (win, categories_found, perfect_data)
 
-    for i, group in enumerate(groups):
-        print(f"Group {i+1}: {group}")
-
-def benchmark_test(json_path, vec_path):
+def benchmark_multiprocess(json_path, vec_path):
     print(f"Loading puzzles from {json_path}...")
     with open(json_path, 'r', encoding='utf-8') as f:
         puzzles = json.load(f)
         
-    print(f"Loading Word2Vec model from {vec_path}...")
-    model = KeyedVectors.load_word2vec_format(vec_path, binary=True)
-    
     total_puzzles = len(puzzles)
-    total_groups_checked = 0
-    total_correct_groups = 0
-    perfect_puzzles = 0
+    print(f"Starting Multiprocessing Benchmark on {total_puzzles} puzzles...")
     
-    print(f"\nStarting benchmark on {total_puzzles} puzzles...")
+    # limits processes to 6 to stay safe
+    num_workers = 8
     
-    for p in tqdm(puzzles, desc="Processing Puzzles", unit="game"):
-        # 1. Flatten the answers to get the board
-        correct_groups_sets = []
-        puzzle_words = []
+    wins = 0
+    total_cats = 0
+    perfect_puzzles = []
+    
+    # creates pool
+    with Pool(processes=num_workers, initializer=init_worker, initargs=(vec_path,)) as pool:
+        # runs puzzles in parallel
+        results = list(tqdm(pool.imap(solve_puzzle_worker, puzzles), total=total_puzzles))
         
-        for ans in p['answers']:
-            group_members = ans['members']
-            puzzle_words.extend(group_members)
-            correct_groups_sets.append(set(group_members))
-        
-        # Shuffle words to simulate real gameplay (prevent order bias)
-        random.shuffle(puzzle_words)
-        
-        # Run Solver
-        predicted_groups = get_predicted_groups(puzzle_words, model)
-        
-        # Score it
-        predicted_sets = [set(g) for g in predicted_groups]
-        
-        matches_this_puzzle = 0
-        for p_set in predicted_sets:
-            if p_set in correct_groups_sets:
-                matches_this_puzzle += 1
-        
-        total_correct_groups += matches_this_puzzle
-        total_groups_checked += 4
-        
-        if matches_this_puzzle == 4:
-            perfect_puzzles += 1
-            tqdm.write(f"\nPerfect Game: ")
-            for i, grp in enumerate(predicted_groups):
-                tqdm.write(f"  Group {i+1}: {grp}")
-            tqdm.write("-" * 30)
+    # sums results and collects perfects
+    for w, c, p_data in results:
+        wins += w
+        total_cats += c
+        if p_data is not None:
+            perfect_puzzles.append(p_data)
 
-    accuracy = (total_correct_groups / total_groups_checked) * 100
-    perfect_rate = (perfect_puzzles / total_puzzles) * 100
-    
+    # saves perfect puzzles
+    with open('perfect_puzzles.json', 'w', encoding='utf-8') as f:
+        json.dump(perfect_puzzles, f, indent=4)
+
+    # calculates percentages
+    total_possible_cats = total_puzzles * 4
+    cat_percentage = (total_cats / total_possible_cats) * 100
+    win_percentage = (wins / total_puzzles) * 100
+
     print("\n" + "="*40)
-    print("       BENCHMARK RESULTS       ")
-    print("="*40)
     print(f"Total Puzzles:      {total_puzzles}")
-    print(f"Total Groups:       {total_groups_checked}")
-    print(f"Correct Groups:     {total_correct_groups}")
-    print(f"Group Accuracy:     {accuracy:.2f}%")
-    print(f"Perfect Games:      {perfect_puzzles} ({perfect_rate:.2f}%)")
+    print(f"Total Wins:         {wins}")
+    print(f"Game Win Rate:      {win_percentage:.2f}%")
+    print(f"Categories Found:   {total_cats}/{total_possible_cats}")
+    print(f"Category Accuracy:  {cat_percentage:.2f}%")
+    print(f"Perfect Games:      {len(perfect_puzzles)}")
+    print(f"Saved to:           perfect_puzzles.json")
     print("="*40)
 
 if __name__ == "__main__":
+    freeze_support() # needed for windows
+    
     vec_path = input("Input model dir: ").strip('"').strip("'")
-    
-    print("\nSelect Mode:")
-    print("1. Run Benchmark (puzzles.json)")
-    print("2. Solve Single Game (Input words manually)")
-    choice = input("Enter 1 or 2: ")
-    
-    if choice == "1":
-        benchmark_test('connections.json', vec_path)
-    elif choice == "2":
-        solve_single_game(vec_path)
-    else:
-        print("Invalid choice.")
+    benchmark_multiprocess('connections.json', vec_path)
