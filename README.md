@@ -112,7 +112,44 @@ Progress is cached to JSON files so the script can resume if interrupted.
 
 ## Results
 
-<!-- TODO: Add results tables, accuracy metrics, and figures here -->
+**Table 1: Comparing Mistral Models, Accuracies Measured over 101 Puzzles**
+
+| Mistral Model | % of Correct Categories | % of Perfect Games |
+|---|---|---|
+| Fine-tuned | 0 | 15.56 |
+| Chain of Thought | 3.03 | 18.43 |
+| Knowledge Distil. | 36.4 | 53.8 |
+
+**Table 2: Examining Claude Sonnet, Accuracies Measured over 101 Puzzles**
+
+| Model | % of Correct Categories | % of Perfect Games |
+|---|---|---|
+| Gam. KD Mistral | 78 | 68.8 |
+| Claude Sonnet | 73.75 | 64 |
+| Claude w/ CoT | 67.5 | 61 |
+
+**Table 3: LLMs vs. Humans, Accuracies Measured over 950 Puzzles**
+
+| Agent | % of Correct Categories | % of Perfect Games |
+|---|---|---|
+| Human | | 71 |
+| Gam. KD Mistral | 78 | 68.8 |
+| Gam. Claude | 96.8 | 92.1 |
+
+**Table 4: Comparison of All Project Models, Accuracies Measured over 950 Puzzles**
+
+| Agent | % of Correct Categories | % of Perfect Games |
+|---|---|---|
+| K-Means (G-News) | 4.21 | 0.31 |
+| K-Means (Wikipedia) | 15.21 | 3.31 |
+| Similarity Graph | 16.66 | 3.93 |
+| Fine-tuned Mistral | 15.56 | 0 |
+| Mistral w/ CoT | 18.43 | 3.03 |
+| Mistral w/ KD | 53.8 | 36.4 |
+| Gam. KD Mistral | 78 | 68.8 |
+| Claude Sonnet | 73.75 | 64 |
+| Claude w/ CoT | 67.5 | 61 |
+| Gam. Claude | 96.8 | 92.1 |
 
 ---
 
